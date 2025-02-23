@@ -1,0 +1,43 @@
+pipeline {
+    agent none
+    
+    stages {
+        stage('Run on All Nodes') {
+            matrix {
+                axes {
+                    axis {
+                        name 'NODE'
+                        values 'dns1', 'dns2', 'vpn1', 'jenkins1'
+                    }
+                }
+                agent {
+                    node "${NODE}"
+                }
+                stages {
+                    stage('Checkout') {
+                        steps {
+                            checkout scm
+                        }
+                    }
+                    
+                    stage('Ping Test') {
+                        steps {
+                            script {
+                                echo "Node Execution: ${env.NODE_NAME}"
+                                
+                                sh 'ping -c 4 google.ro'
+                                
+                            }
+                        }
+                    }
+
+                    stage('Cleanup After') {
+                        steps {
+                            cleanWs()
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
