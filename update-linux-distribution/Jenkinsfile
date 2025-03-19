@@ -1,6 +1,6 @@
 pipeline {
     agent none
-
+    
     triggers {
         cron('H */11 * * *')
     }
@@ -29,19 +29,104 @@ pipeline {
                             script {
                                 echo "Node Execution: ${env.NODE_NAME}"
                                 
-                                sh 'dnf update -y'
+                                // Capture command output to send to Telegram
+                                def updateOutput = ""
+                                try {
+                                    updateOutput = sh(script: 'dnf update -y', returnStdout: true).trim()
+                                } catch (Exception e) {
+                                    updateOutput = "Error running update: ${e.message}"
+                                }
                                 
+                                // Save output to a temporary file to avoid issues with special characters
+                                writeFile file: 'update_output.txt', text: updateOutput
+                                
+                                // Prepare a simplified message with proper escaping for Telegram
+                                def escapedMessage = "🔄 *System update on node ${NODE}*\\. Update in progress\\. See logs for details\\."
+                                
+                                // Send notification to Telegram using secure credentials
+                                withCredentials([
+                                    string(credentialsId: 'telegram-bot-access-token', variable: 'TELEGRAM_BOT_TOKEN'),
+                                    string(credentialsId: 'telegram-bot-access-chatid', variable: 'TELEGRAM_CHAT_ID')
+                                ]) {
+                                    // Send the notification message
+                                    sendToTelegram(escapedMessage)
+                                    
+                                    // Wait a moment to ensure messages are sent in order
+                                    sleep 1
+                                    
+                                    // Send the update output as a separate message
+                                    // Truncate if too large and escape special characters
+                                    if (updateOutput.length() > 0) {
+                                        def truncated = updateOutput.length() > 3800 ? updateOutput.take(3800) + "..." : updateOutput
+                                        // Escape markdown special characters
+                                        truncated = truncated.replaceAll('([_*\\[\\]()~`>#+-=|{}.!])', '\\\\$1')
+                                        
+                                        // Send the update details
+                                        sendToTelegram("📋 *Update details for ${NODE}*\\. " + truncated)
+                                    }
+                                }
                             }
                         }
                     }
-
+                    
                     stage('Cleanup After') {
                         steps {
                             cleanWs()
+                            
+                            // Completion notification using secure credentials
+                            script {
+                                withCredentials([
+                                    string(credentialsId: 'telegram-bot-access-token', variable: 'TELEGRAM_BOT_TOKEN'),
+                                    string(credentialsId: 'telegram-bot-access-chatid', variable: 'TELEGRAM_CHAT_ID')
+                                ]) {
+                                    sendToTelegram("✅ System update on node \\${NODE}\\ has completed successfully\\.")
+                                }
+                            }
+                        }
+                    }
+                }
+                post {
+                    failure {
+                        script {
+                            withCredentials([
+                                string(credentialsId: 'telegram-bot-access-token', variable: 'TELEGRAM_BOT_TOKEN'),
+                                string(credentialsId: 'telegram-bot-access-chatid', variable: 'TELEGRAM_CHAT_ID')
+                            ]) {
+                                sendToTelegram("❌ \\*ERROR:\\* System update on node \\${NODE}\\ has failed\\! Check logs: ${env.BUILD_URL}")
+                            }
                         }
                     }
                 }
             }
         }
+    }
+}
+
+// Function for sending messages to Telegram
+def sendToTelegram(message) {
+    try {
+        // Use a temporary file to avoid issues with special characters and command injection
+        def messageFile = "telegram_message_${System.currentTimeMillis()}.txt"
+        writeFile file: messageFile, text: message
+        
+        // Use curl to send message through Telegram API with the file content
+        def response = sh(script: """
+            curl -s -S -X POST https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage \
+                -d chat_id=${TELEGRAM_CHAT_ID} \
+                -d text="\$(cat ${messageFile})" \
+                -d parse_mode=MarkdownV2
+        """, returnStdout: true).trim()
+        
+        // Clean up the temporary file
+        sh "rm -f ${messageFile}"
+        
+        if (response.contains("bots can't send messages to bots")) {
+            echo "ERROR: The TELEGRAM_CHAT_ID appears to be another bot. Please use a user or group chat ID instead."
+            echo "Telegram message was not delivered."
+        } else {
+            echo "Telegram message sent: ${response}"
+        }
+    } catch (Exception e) {
+        echo "Error sending Telegram message: ${e.message}"
     }
 }
